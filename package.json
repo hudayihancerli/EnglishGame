@@ -4,16 +4,20 @@
   "private": true,
   "scripts": {
     "android": "react-native run-android",
+    "build:game": "node scripts/build-game.mjs",
     "ios": "react-native run-ios",
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest"
   },
   "dependencies": {
+    "@react-native/new-app-screen": "0.88.1",
     "react": "19.3.0",
     "react-native": "0.88.1",
-    "@react-native/new-app-screen": "0.88.1",
-    "react-native-safe-area-context": "^5.5.2"
+    "react-native-safe-area-context": "^5.5.2",
+    "react-native-webview": "^14.0.1",
+    "three": "^0.187.0",
+    "ws": "^8.23.0"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
@@ -30,6 +34,7 @@
     "@types/jest": "^29.5.13",
     "@types/react": "^19.2.0",
     "@types/react-test-renderer": "^19.1.0",
+    "esbuild": "^0.28.2",
     "eslint": "^8.19.0",
     "jest": "^29.6.3",
     "prettier": "2.8.8",
