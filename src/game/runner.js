@@ -1,18 +1,34 @@
 import * as THREE from 'three';
 import { QUESTIONS } from './questions.js';
+import { createRoadside } from './roadside.js';
+import { DIFFICULTIES, normalizeDifficulty, WORLD_THEMES } from './settings.js';
 
 const LANE_X = [-3.6, -1.2, 1.2, 3.6];
 const LANE_LETTERS = ['A', 'B', 'C', 'D'];
 const LANE_COLORS = ['#ef4444', '#3b82f6', '#f59e0b', '#a855f7'];
 const LANE_COLOR_HEX = [0xef4444, 0x3b82f6, 0xf59e0b, 0xa855f7];
 const BASE_SPEED = 14;
+const START_SPEED_MULT = 1.0;
+const MIN_SPEED_MULT = 0.55;
+let difficulty = 'normal';
+let speedProfile = DIFFICULTIES.normal;
 const GATE_SPAWN_Z = -68;
 const GATE_SPACING = 62;
 const TOTAL_QUESTIONS = 30;
+const CAMERA_FOV = 46;
+const CAMERA_PITCH = Math.atan(0.92 * Math.tan(THREE.MathUtils.degToRad(CAMERA_FOV / 2)));
+const RUNNER_SCREEN_Y = 0.85;
+const PLAYER_VIEW_HALF_WIDTH = 4.8;
+const ROAD_HALF_WIDTH = 5.3;
+const TRACK_NEAR_Z = 18;
+const TRACK_FAR_Z = -330;
+const TRACK_LENGTH = TRACK_NEAR_Z - TRACK_FAR_Z;
+const TRACK_CENTER_Z = (TRACK_NEAR_Z + TRACK_FAR_Z) / 2;
+const DASH_SPACING = 6;
 
 let gameActive = false;
 let myFinished = false;
-let speedMult = 1.0;
+let speedMult = START_SPEED_MULT;
 let score = 0;
 let streak = 0;
 let currentLane = 1;
@@ -72,22 +88,56 @@ function sendToRN(payload) {
 // --- Scene Setup ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b1020);
-scene.fog = new THREE.FogExp2(0x0b1020, 0.013);
+scene.fog = new THREE.FogExp2(0x0b1020, 0.0035);
 
 const camera = new THREE.PerspectiveCamera(
-  65,
+  CAMERA_FOV,
   window.innerWidth / window.innerHeight,
   0.1,
-  160
+  380
 );
-camera.position.set(0, 5.5, 9.6);
-camera.lookAt(0, 1.9, -14);
+
+function configureCamera() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.fov = CAMERA_FOV;
+  const halfFov = THREE.MathUtils.degToRad(CAMERA_FOV / 2);
+  // Frame the four lanes at the player's feet, rather than at the screen bottom.
+  const depth = Math.max(13, PLAYER_VIEW_HALF_WIDTH / (Math.tan(halfFov) * camera.aspect));
+  const verticalOffset = (RUNNER_SCREEN_Y * 2 - 1) * Math.tan(halfFov);
+  const height = depth * (Math.sin(CAMERA_PITCH) + verticalOffset * Math.cos(CAMERA_PITCH));
+  const distance = depth * (Math.cos(CAMERA_PITCH) - verticalOffset * Math.sin(CAMERA_PITCH));
+  camera.position.set(0, height, distance);
+  camera.rotation.set(-CAMERA_PITCH, 0, 0);
+  camera.far = Math.max(380, distance - TRACK_FAR_Z + 30);
+  camera.updateProjectionMatrix();
+}
+
+configureCamera();
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
 renderer.shadowMap.enabled = false;
 document.body.appendChild(renderer.domElement);
+
+// Four screen-space columns describe the tap targets, independently of road perspective.
+const touchLaneGuide = document.createElement('div');
+touchLaneGuide.className = 'touch-lane-guide';
+touchLaneGuide.setAttribute('aria-hidden', 'true');
+document.body.appendChild(touchLaneGuide);
+
+function showTouchLaneGuide() {
+  touchLaneGuide.replaceChildren();
+  const flash = document.createElement('div');
+  flash.className = 'touch-lane-flash';
+  for (const color of LANE_COLORS) {
+    const lane = document.createElement('div');
+    lane.style.backgroundColor = color;
+    flash.appendChild(lane);
+  }
+  flash.addEventListener('animationend', () => flash.remove(), { once: true });
+  touchLaneGuide.appendChild(flash);
+}
 
 // --- Lighting ---
 const ambientLight = new THREE.AmbientLight(0xdbeafe, 0.95);
@@ -105,7 +155,7 @@ scene.add(rimLight);
 const trackGroup = new THREE.Group();
 scene.add(trackGroup);
 
-const roadGeo = new THREE.PlaneGeometry(10.8, 240);
+const roadGeo = new THREE.PlaneGeometry(10.8, TRACK_LENGTH);
 const roadMat = new THREE.MeshStandardMaterial({
   color: 0x151c32,
   roughness: 0.75,
@@ -113,11 +163,11 @@ const roadMat = new THREE.MeshStandardMaterial({
 });
 const road = new THREE.Mesh(roadGeo, roadMat);
 road.rotation.x = -Math.PI / 2;
-road.position.z = -100;
+road.position.z = TRACK_CENTER_Z;
 trackGroup.add(road);
 
 // Colored lane strips for A, B, C, D
-const laneStripGeo = new THREE.PlaneGeometry(2.15, 240);
+const laneStripGeo = new THREE.PlaneGeometry(2.15, TRACK_LENGTH);
 for (let i = 0; i < 4; i++) {
   const stripMat = new THREE.MeshBasicMaterial({
     color: LANE_COLOR_HEX[i],
@@ -126,35 +176,95 @@ for (let i = 0; i < 4; i++) {
   });
   const strip = new THREE.Mesh(laneStripGeo, stripMat);
   strip.rotation.x = -Math.PI / 2;
-  strip.position.set(LANE_X[i], 0.01, -100);
+  strip.position.set(LANE_X[i], 0.01, TRACK_CENTER_Z);
   trackGroup.add(strip);
 }
 
-const railGeo = new THREE.BoxGeometry(0.22, 0.4, 240);
+const railGeo = new THREE.BoxGeometry(0.22, 0.4, TRACK_LENGTH);
 const railMat = new THREE.MeshStandardMaterial({
   color: 0x38bdf8,
   emissive: 0x0284c7,
   emissiveIntensity: 0.8,
 });
 const leftRail = new THREE.Mesh(railGeo, railMat);
-leftRail.position.set(-5.3, 0.2, -100);
+leftRail.position.set(-ROAD_HALF_WIDTH, 0.2, TRACK_CENTER_Z);
 const rightRail = new THREE.Mesh(railGeo, railMat);
-rightRail.position.set(5.3, 0.2, -100);
+rightRail.position.set(ROAD_HALF_WIDTH, 0.2, TRACK_CENTER_Z);
 trackGroup.add(leftRail, rightRail);
 
-const dashes = [];
 const dashGeo = new THREE.BoxGeometry(0.1, 0.02, 2.4);
 const dashMat = new THREE.MeshBasicMaterial({ color: 0x475569 });
 const dividerXs = [-2.4, 0, 2.4];
+const dashRows = Math.ceil(TRACK_LENGTH / DASH_SPACING);
+const dashes = new THREE.InstancedMesh(dashGeo, dashMat, dashRows * dividerXs.length);
+const dashMatrix = new THREE.Matrix4();
+let dashIndex = 0;
 
-for (let z = 10; z > -160; z -= 6) {
+for (let row = 0; row < dashRows; row++) {
+  const z = TRACK_NEAR_Z - row * DASH_SPACING;
   for (const x of dividerXs) {
-    const dash = new THREE.Mesh(dashGeo, dashMat);
-    dash.position.set(x, 0.02, z);
-    trackGroup.add(dash);
-    dashes.push(dash);
+    dashMatrix.makeTranslation(x, 0.02, z);
+    dashes.setMatrixAt(dashIndex++, dashMatrix);
   }
 }
+dashes.instanceMatrix.needsUpdate = true;
+dashes.computeBoundingSphere();
+trackGroup.add(dashes);
+
+const roadside = createRoadside(TRACK_NEAR_Z, TRACK_FAR_Z);
+scene.add(roadside.group);
+
+// Day decorations use two draw calls and no additional lights or shadows.
+let activeTheme = 'day';
+const skyGroup = new THREE.Group();
+camera.add(skyGroup);
+scene.add(camera);
+const sun = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color: 0xffdb70, fog: false }));
+skyGroup.add(sun);
+const clouds = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 0), new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false }), 9);
+skyGroup.add(clouds);
+function positionSky() {
+  // The horizon is at y = 0.92 in camera screen space. Keep the decorations above it
+  // and near the far plane, so scenery occludes them naturally.
+  const depth = camera.far - 8;
+  const spread = depth * Math.tan(THREE.MathUtils.degToRad(CAMERA_FOV / 2));
+  const width = spread * camera.aspect;
+  sun.position.set(-width * 0.68, spread * 0.963, -depth);
+  sun.scale.setScalar(spread * 0.029);
+  const matrix = new THREE.Object3D();
+  for (let i = 0; i < 9; i++) {
+    const cluster = Math.floor(i / 3);
+    const puff = i % 3;
+    matrix.position.set(
+      width * (-0.28 + cluster * 0.48 + (puff - 1) * 0.065),
+      spread * (0.957 + cluster * 0.01 + (puff === 1 ? 0.008 : 0)),
+      -depth,
+    );
+    matrix.scale.set(width * 0.07, spread * (puff === 1 ? 0.013 : 0.009), 0.5);
+    matrix.updateMatrix();
+    clouds.setMatrixAt(i, matrix.matrix);
+  }
+  clouds.instanceMatrix.needsUpdate = true;
+  clouds.computeBoundingSphere();
+}
+function applyTheme(value) {
+  activeTheme = value === 'night' ? 'night' : 'day';
+  const palette = WORLD_THEMES[activeTheme];
+  scene.background.setHex(palette.sky);
+  scene.fog.color.setHex(palette.sky);
+  roadMat.color.setHex(palette.road);
+  dashMat.color.setHex(palette.dash);
+  railMat.color.setHex(palette.rail);
+  railMat.emissive.setHex(palette.emissive);
+  ambientLight.color.setHex(palette.ambient);
+  ambientLight.intensity = palette.intensity;
+  rimLight.intensity = activeTheme === 'day' ? 0.2 : 0.7;
+  dirLight.intensity = activeTheme === 'day' ? 1.0 : 1.3;
+  roadside.setTheme(activeTheme);
+  skyGroup.visible = activeTheme === 'day';
+}
+positionSky();
+applyTheme('day');
 
 // --- Name Tag Sprite ---
 function createNameSprite(name, colorHex) {
@@ -186,6 +296,7 @@ function createNameSprite(name, colorHex) {
 // --- 3D Runner Builder ---
 function createRunnerMesh(colorStr, labelName) {
   const group = new THREE.Group();
+  group.scale.setScalar(1.4);
   const colorVal = new THREE.Color(colorStr || '#38bdf8');
 
   const bodyMat = new THREE.MeshStandardMaterial({ color: colorVal, roughness: 0.35, metalness: 0.2 });
@@ -365,50 +476,51 @@ function spawnBurst(x, y, z, colorHex) {
 // --- Large, Crisp Gate Texture Builder ---
 function createOptionTexture(text, accentColor) {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 360;
+  // Match the sign's 2.3:1.9 aspect ratio and draw at double resolution.
+  canvas.width = 1024;
+  canvas.height = 848;
   const ctx = canvas.getContext('2d');
-
+  ctx.scale(2, 2);
   ctx.fillStyle = '#090f22';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
+  ctx.fillRect(0, 0, 512, 424);
   ctx.strokeStyle = accentColor;
-  ctx.lineWidth = 18;
-  ctx.strokeRect(9, 9, canvas.width - 18, canvas.height - 18);
-
-  // Colored top accent bar (no A/B/C/D letter)
+  ctx.lineWidth = 12;
+  ctx.strokeRect(6, 6, 500, 412);
   ctx.fillStyle = accentColor;
-  ctx.fillRect(18, 18, canvas.width - 36, 26);
+  ctx.fillRect(12, 12, 488, 18);
 
+  const words = String(text).trim().split(/\s+/);
+  let lines = [];
+  let fontSize = 88;
+  for (; fontSize >= 24; fontSize -= 2) {
+    ctx.font = `bold ${fontSize}px sans-serif`;
+    lines = [];
+    let line = '';
+    for (const word of words) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (line && ctx.measureText(candidate).width > 448) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = candidate;
+      }
+    }
+    if (line) lines.push(line);
+    if (lines.every(value => ctx.measureText(value).width <= 448) &&
+        lines.length * (fontSize + 12) <= 320) break;
+  }
   ctx.fillStyle = '#ffffff';
-  const words = String(text).split(' ');
-  const fontSize = words.length >= 2 || text.length > 10 ? 64 : 78;
-  ctx.font = `bold ${fontSize}px sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-
-  const lines = [];
-  let line = '';
-  for (const w of words) {
-    const testLine = line ? `${line} ${w}` : w;
-    if (ctx.measureText(testLine).width > 440 && line) {
-      lines.push(line);
-      line = w;
-    } else {
-      line = testLine;
-    }
-  }
-  if (line) lines.push(line);
-
-  const lineHeight = fontSize + 14;
-  const centerY = 200;
-  const startY = centerY - ((lines.length - 1) * lineHeight) / 2;
-  lines.forEach((l, idx) => {
-    ctx.fillText(l, 256, startY + idx * lineHeight);
-  });
+  const lineHeight = fontSize + 12;
+  const startY = 228 - ((lines.length - 1) * lineHeight) / 2;
+  lines.forEach((line, index) => ctx.fillText(line, 256, startY + index * lineHeight, 448));
 
   const texture = new THREE.CanvasTexture(canvas);
-  texture.anisotropy = 4;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
   return texture;
 }
 
@@ -464,7 +576,7 @@ function spawnNextGateRow(zPos) {
     panel.position.set(0, 1.5, 0);
 
     const signTex = createOptionTexture(questionData.options[i], LANE_COLORS[i]);
-    const signMat = new THREE.MeshBasicMaterial({ map: signTex, side: THREE.DoubleSide });
+    const signMat = new THREE.MeshBasicMaterial({ map: signTex, side: THREE.DoubleSide, toneMapped: false });
     const sign = new THREE.Mesh(signGeo, signMat);
     sign.position.set(0, 2.7, 0.14);
 
@@ -563,13 +675,18 @@ function spawnFinishLine(zPos) {
   finishLineActive = true;
 }
 
-function resetAndStartGame(seed) {
+function resetAndStartGame(seed, selectedDifficulty = 'normal') {
+  difficulty = normalizeDifficulty(selectedDifficulty);
+  speedProfile = DIFFICULTIES[difficulty];
+  activePointer = null;
+  roadside.reset();
+  dashes.position.z = 0;
   clearGateRows();
   clearFinishLine();
   gameQuestions = pickRandomQuestions(QUESTIONS, seed, TOTAL_QUESTIONS);
   spawnedCount = 0;
   passedCount = 0;
-  speedMult = 1.0;
+  speedMult = START_SPEED_MULT;
   score = 0;
   streak = 0;
   myDistance = 0;
@@ -590,9 +707,11 @@ function resetAndStartGame(seed) {
   const firstRow = spawnNextGateRow(GATE_SPAWN_Z);
   spawnNextGateRow(GATE_SPAWN_Z - GATE_SPACING);
   gameActive = true;
+  showTouchLaneGuide();
 
   sendToRN({
     type: 'GAME_STARTED',
+    difficulty,
     question: firstRow ? firstRow.questionData.q : '',
     options: firstRow ? firstRow.questionData.options : [],
     questionNum: 1,
@@ -605,12 +724,20 @@ function resetAndStartGame(seed) {
 }
 
 // --- Multiplayer WebSocket Connection ---
-function connectToRoom(serverUrl, code, name, color) {
+function leaveRoom() {
   if (ws) {
+    ws.onmessage = null;
+    ws.onopen = null;
+    ws.onerror = null;
     try { ws.close(); } catch {}
     ws = null;
   }
   clearRemotePlayers();
+  myPlayerId = null;
+}
+
+function connectToRoom(serverUrl, code, name, color) {
+  leaveRoom();
   myColorHex = color || '#38bdf8';
   myRunner.setColor(myColorHex);
 
@@ -626,16 +753,17 @@ function connectToRoom(serverUrl, code, name, color) {
     return;
   }
 
+  const socket = ws;
   const timeout = setTimeout(() => {
-    if (ws && ws.readyState !== 1) {
-      try { ws.close(); } catch {}
+    if (ws === socket && socket.readyState !== 1) {
+      try { socket.close(); } catch {}
       sendToRN({ type: 'ERROR', message: 'Sunucuya bağlanılamadı (zaman aşımı).' });
     }
   }, 8000);
 
-  ws.onopen = () => {
+  socket.onopen = () => {
     clearTimeout(timeout);
-    ws.send(JSON.stringify({
+    socket.send(JSON.stringify({
       type: 'JOIN',
       code: code || '1234',
       name: name || 'Oyuncu',
@@ -643,7 +771,7 @@ function connectToRoom(serverUrl, code, name, color) {
     }));
   };
 
-  ws.onmessage = (event) => {
+  socket.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === 'WELCOME') {
@@ -652,25 +780,32 @@ function connectToRoom(serverUrl, code, name, color) {
           type: 'LOBBY',
           code: msg.code,
           status: msg.status,
+          hostId: msg.hostId,
+          difficulty: msg.difficulty,
           players: msg.players || [],
           myPlayerId,
         });
         if (msg.status === 'PLAYING') {
-          resetAndStartGame(msg.seed || 42);
+          resetAndStartGame(msg.seed || 42, msg.difficulty);
         }
       } else if (msg.type === 'LOBBY_UPDATE') {
+        if (msg.status === 'PLAYING') return;
         gameActive = false;
+        touchLaneGuide.replaceChildren();
         myFinished = false;
+        activePointer = null;
         clearGateRows();
         sendToRN({
           type: 'LOBBY',
           code: msg.code,
           status: msg.status,
+          hostId: msg.hostId,
+          difficulty: msg.difficulty,
           players: msg.players || [],
           myPlayerId,
         });
       } else if (msg.type === 'GAME_START') {
-        resetAndStartGame(msg.seed || 42);
+        resetAndStartGame(msg.seed || 42, msg.difficulty);
       } else if (msg.type === 'PLAYERS') {
         updateRemotePlayersFromServer(msg.players || []);
       } else if (msg.type === 'RANKINGS') {
@@ -679,12 +814,12 @@ function connectToRoom(serverUrl, code, name, color) {
     } catch {}
   };
 
-  ws.onerror = () => {
+  socket.onerror = () => {
     clearTimeout(timeout);
     sendToRN({ type: 'ERROR', message: 'Bağlantı hatası! Sunucu adresini kontrol edin.' });
   };
 
-  ws.onclose = () => {
+  socket.onclose = () => {
     clearTimeout(timeout);
   };
 }
@@ -692,22 +827,39 @@ function connectToRoom(serverUrl, code, name, color) {
 function handleRNMessage(event) {
   try {
     const msg = JSON.parse(event.data);
-    if (msg.type === 'JOIN') {
+    if (msg.type === 'SET_THEME') {
+      applyTheme(msg.theme);
+    } else if (msg.type === 'JOIN') {
       connectToRoom(msg.serverUrl, msg.code, msg.name, msg.color);
+    } else if (msg.type === 'LEAVE_ROOM') {
+      leaveRoom();
+    } else if (msg.type === 'SET_DIFFICULTY') {
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'SET_DIFFICULTY', difficulty: normalizeDifficulty(msg.difficulty) }));
+      }
     } else if (msg.type === 'START_GAME') {
       if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: 'START_GAME' }));
+        ws.send(JSON.stringify({
+          type: 'START_GAME',
+          difficulty: typeof msg.difficulty === 'string' ? normalizeDifficulty(msg.difficulty) : undefined,
+        }));
       }
     } else if (msg.type === 'BACK_TO_LOBBY') {
       if (ws && ws.readyState === 1) {
         ws.send(JSON.stringify({ type: 'BACK_TO_LOBBY' }));
       }
+    } else if (msg.type === 'SELECT_LANE') {
+      if (gameActive && !myFinished && Number.isInteger(msg.lane) &&
+          msg.lane >= 0 && msg.lane < LANE_X.length) {
+        selectLane(msg.lane, true);
+      }
     } else if (msg.type === 'SOLO') {
+      leaveRoom();
       myPlayerId = 'solo';
       myColorHex = msg.color || '#38bdf8';
       myRunner.setColor(myColorHex);
-      clearRemotePlayers();
-      resetAndStartGame(Math.floor(Math.random() * 100000));
+      applyTheme(msg.theme);
+      resetAndStartGame(Math.floor(Math.random() * 100000), msg.difficulty);
     }
   } catch {}
 }
@@ -716,51 +868,57 @@ window.addEventListener('message', handleRNMessage);
 document.addEventListener('message', handleRNMessage);
 
 // --- Controls ---
-let touchStartX = null;
+let activePointer = null;
 
-window.addEventListener('touchstart', (e) => {
-  if (!gameActive || myFinished) return;
-  if (e.touches.length > 0) {
-    touchStartX = e.touches[0].clientX;
-  }
+function selectLane(lane, repeatFeedback = false) {
+  const nextLane = Math.min(LANE_X.length - 1, Math.max(0, lane));
+  if (nextLane === currentLane && !repeatFeedback) return;
+  currentLane = nextLane;
+  targetX = LANE_X[currentLane];
+  sendToRN({ type: 'LANE_SELECTED', lane: currentLane });
+}
+
+// Pointer events handle touch, mouse and pen without duplicate synthetic clicks.
+window.addEventListener('pointerdown', (e) => {
+  if (!gameActive || myFinished || !e.isPrimary || e.button !== 0) return;
+  activePointer = { id: e.pointerId, startX: e.clientX };
 }, { passive: true });
 
-window.addEventListener('touchend', (e) => {
-  if (!gameActive || myFinished || touchStartX === null || e.changedTouches.length === 0) return;
-  const endX = e.changedTouches[0].clientX;
-  const dx = endX - touchStartX;
+window.addEventListener('pointerup', (e) => {
+  if (!activePointer || activePointer.id !== e.pointerId) return;
+  const dx = e.clientX - activePointer.startX;
+  activePointer = null;
+  if (!gameActive || myFinished) return;
 
   if (Math.abs(dx) > 28) {
-    if (dx < 0 && currentLane > 0) currentLane--;
-    else if (dx > 0 && currentLane < 3) currentLane++;
+    selectLane(currentLane + (dx < 0 ? -1 : 1));
   } else {
-    const ratio = endX / window.innerWidth;
-    currentLane = Math.min(3, Math.max(0, Math.floor(ratio * 4)));
+    selectLane(Math.floor((e.clientX / window.innerWidth) * LANE_X.length), true);
   }
-  targetX = LANE_X[currentLane];
-  touchStartX = null;
 }, { passive: true });
+
+window.addEventListener('pointercancel', (e) => {
+  if (activePointer?.id === e.pointerId) activePointer = null;
+}, { passive: true });
+window.addEventListener('blur', () => { activePointer = null; });
 
 window.addEventListener('keydown', (e) => {
   if (!gameActive || myFinished) return;
   if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
-    if (currentLane > 0) currentLane--;
+    selectLane(currentLane - 1);
   } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
-    if (currentLane < 3) currentLane++;
+    selectLane(currentLane + 1);
   }
-  targetX = LANE_X[currentLane];
 });
 
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
+  configureCamera();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
 // --- Main Loop ---
 let lastTime = performance.now();
 let runPhase = 0;
-let shakeTime = 0;
 let syncTimer = 0;
 
 function animate(now) {
@@ -812,24 +970,8 @@ function animate(now) {
   runPhase += dt * 10 * speedMult;
   animateRunnerLimbs(myRunner, runPhase);
 
-  const desiredFov = 62 + (speedMult - 1.0) * 9;
-  camera.fov += (desiredFov - camera.fov) * dt * 4;
-  camera.updateProjectionMatrix();
-
-  let camX = myRunner.group.position.x * 0.35;
-  let camY = 5.5;
-  if (shakeTime > 0) {
-    shakeTime -= dt;
-    camX += (Math.random() - 0.5) * 0.35;
-    camY += (Math.random() - 0.5) * 0.35;
-  }
-  camera.position.x += (camX - camera.position.x) * dt * 8;
-  camera.position.y = camY;
-
-  for (const d of dashes) {
-    d.position.z += worldSpeed * dt;
-    if (d.position.z > 12) d.position.z -= 168;
-  }
+  roadside.update(worldSpeed * dt);
+  dashes.position.z = (dashes.position.z + worldSpeed * dt) % DASH_SPACING;
 
   for (let i = gateRows.length - 1; i >= 0; i--) {
     const row = gateRows[i];
@@ -854,7 +996,7 @@ function animate(now) {
 
       let feedback;
       if (isCorrect) {
-        speedMult = Math.min(2.4, Number((speedMult + 0.12).toFixed(2)));
+        speedMult = Math.min(speedProfile.max, Number((speedMult + speedProfile.correctStep).toFixed(2)));
         score += 1;
         streak += 1;
         chosenGate.panelMat.color.setHex(0x22c55e);
@@ -863,12 +1005,11 @@ function animate(now) {
         spawnBurst(LANE_X[chosenLane], 1.5, 0, 0x4ade80);
         feedback = { correct: true, text: 'DOĞRU! +HIZ' };
       } else {
-        speedMult = Math.max(0.55, Number((speedMult - 0.22).toFixed(2)));
+        speedMult = Math.max(MIN_SPEED_MULT, Number((speedMult - speedProfile.wrongStep).toFixed(2)));
         streak = 0;
         chosenGate.panelMat.color.setHex(0xef4444);
         chosenGate.panelMat.opacity = 0.65;
         chosenGate.pillarMat.color.setHex(0xef4444);
-        shakeTime = 0.28;
         spawnBurst(LANE_X[chosenLane], 1.5, 0, 0xf87171);
         feedback = { correct: false, text: 'YANLIŞ! YAVAŞLA' };
       }
@@ -931,6 +1072,8 @@ function animate(now) {
     if (finishLineGroup.position.z >= 0) {
       finishLineActive = false;
       myFinished = true;
+      touchLaneGuide.replaceChildren();
+      activePointer = null;
       spawnBurst(myRunner.group.position.x, 1.8, 0, 0xfacc15);
       const elapsedMs = Math.round(performance.now() - startTimeMs);
       if (ws && ws.readyState === 1) {

@@ -24,6 +24,20 @@ const html = `<!DOCTYPE html>
     * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #0b1020; touch-action: none; }
     canvas { display: block; width: 100%; height: 100%; }
+    .touch-lane-guide { position: fixed; inset: 0; pointer-events: none; z-index: 1; }
+    .touch-lane-flash { position: absolute; inset: 0; display: flex; animation: touch-lane-intro 700ms ease-in-out 3 forwards; }
+    .touch-lane-flash > div { flex: 1; }
+    @keyframes touch-lane-intro {
+      0%, 100% { opacity: 0; }
+      20%, 50% { opacity: 0.22; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .touch-lane-flash { animation: touch-lane-still 1600ms linear forwards; }
+    }
+    @keyframes touch-lane-still {
+      0%, 85% { opacity: 0.16; }
+      100% { opacity: 0; }
+    }
   </style>
 </head>
 <body>

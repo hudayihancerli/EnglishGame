@@ -1,3 +1,4 @@
+import { normalizeDifficulty } from '../src/game/settings.js';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -39,6 +40,7 @@ function getOrCreateRoom(code) {
     rooms.set(key, {
       code: key,
       status: 'LOBBY',
+      difficulty: 'normal',
       seed: Math.floor(Math.random() * 1000000) + 1,
       rankings: [],
       players: new Map(),
@@ -121,11 +123,17 @@ function getLobbyPlayers(room) {
   return list;
 }
 
+function getHostId(room) {
+  return room.players.keys().next().value ?? null;
+}
+
 function broadcastLobby(room) {
   broadcastRoom(room, {
     type: 'LOBBY_UPDATE',
     code: room.code,
     status: room.status,
+    hostId: getHostId(room),
+    difficulty: room.difficulty,
     players: getLobbyPlayers(room),
   });
 }
@@ -173,24 +181,31 @@ wss.on('connection', (ws) => {
     }
 
     if (data.type === 'JOIN') {
-      if (currentRoom) {
+      const nextRoom = getOrCreateRoom(data.code);
+      if (currentRoom && currentRoom !== nextRoom) {
         currentRoom.players.delete(playerId);
-        broadcastLobby(currentRoom);
+        if (currentRoom.players.size === 0) {
+          rooms.delete(currentRoom.code);
+        } else {
+          broadcastLobby(currentRoom);
+        }
       }
-      currentRoom = getOrCreateRoom(data.code);
+      currentRoom = nextRoom;
       const safeName = (data.name || `Oyuncu ${playerId}`).trim().slice(0, 14) || `Oyuncu ${playerId}`;
       const safeColor = typeof data.color === 'string' ? data.color : '#38bdf8';
 
+      const existingPlayer = currentRoom.players.get(playerId);
       currentRoom.players.set(playerId, {
         ws,
-        name: safeName,
-        color: safeColor,
         lane: 1,
         x: -1.2,
         distance: 0,
         speedMult: 1.0,
         score: 0,
         finished: false,
+        ...existingPlayer,
+        name: safeName,
+        color: safeColor,
       });
 
       ws.send(
@@ -200,12 +215,23 @@ wss.on('connection', (ws) => {
           code: currentRoom.code,
           status: currentRoom.status,
           seed: currentRoom.seed,
+          hostId: getHostId(currentRoom),
+          difficulty: currentRoom.difficulty,
           players: getLobbyPlayers(currentRoom),
           rankings: currentRoom.rankings,
         }),
       );
       broadcastLobby(currentRoom);
+    } else if (data.type === 'SET_DIFFICULTY' && currentRoom) {
+      if (currentRoom.status !== 'LOBBY' || getHostId(currentRoom) !== playerId) return;
+      currentRoom.difficulty = normalizeDifficulty(data.difficulty);
+      broadcastLobby(currentRoom);
     } else if (data.type === 'START_GAME' && currentRoom) {
+      if (currentRoom.status !== 'LOBBY' || getHostId(currentRoom) !== playerId) return;
+      // Older clients put the difficulty on the start message.
+      if (typeof data.difficulty === 'string') {
+        currentRoom.difficulty = normalizeDifficulty(data.difficulty);
+      }
       currentRoom.status = 'PLAYING';
       currentRoom.seed = Math.floor(Math.random() * 1000000) + 1;
       currentRoom.rankings = [];
@@ -220,6 +246,7 @@ wss.on('connection', (ws) => {
       broadcastRoom(currentRoom, {
         type: 'GAME_START',
         seed: currentRoom.seed,
+        difficulty: currentRoom.difficulty,
       });
       broadcastSnapshot(currentRoom);
     } else if (data.type === 'STATE' && currentRoom) {
